@@ -1,7 +1,9 @@
-package ar.edu.turnos.catalogo.catalogo.infrastructure.catedra;
+package ar.edu.turnos.catalogo.catalogo.infrastructure.rest;
 
+import ar.edu.turnos.catalogo.config.CatedraIntegrationProperties;
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.DayOfWeek;
 import java.time.LocalTime;
@@ -11,7 +13,7 @@ import org.springframework.web.client.RestClient;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class CatedraSnapshotAdapterTests {
+class CatedraSnapshotRestAdapterTests {
 
     @Test
     void readsCourseContractAndUsesTechnicalBearerToken() throws Exception {
@@ -49,8 +51,10 @@ class CatedraSnapshotAdapterTests {
         });
         server.start();
         try {
-            var adapter = new CatedraSnapshotAdapter(RestClient.builder(),
-                    "http://127.0.0.1:" + server.getAddress().getPort(), "test-token");
+            var properties = new CatedraIntegrationProperties(
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                    "test-token", "catedra.catalog.test");
+            var adapter = new CatedraSnapshotRestAdapter(RestClient.builder(), properties);
             var snapshot = adapter.fetch();
             assertThat(authorization).hasValue("Bearer test-token");
             assertThat(path).hasValue("/api/synchronization/snapshot");

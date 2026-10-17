@@ -1,4 +1,4 @@
-package ar.edu.turnos.catalogo.catalogo.infrastructure.persistence;
+package ar.edu.turnos.catalogo.catalogo.infrastructure.persistence.jdbc;
 
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogSnapshot;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogSnapshotStore;

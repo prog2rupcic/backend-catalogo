@@ -21,6 +21,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -31,8 +32,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @SpringBootTest(properties = {
         "catalog.bootstrap.enabled=false",
         "catalog.catedra.base-url=http://localhost:9999",
-        "catalog.catedra.jwt=test-only"
+        "catalog.catedra.jwt=test-only",
+        "management.health.redis.enabled=false"
 })
+@TestPropertySource("classpath:test-integration.properties")
 @Testcontainers
 class CatalogInitializationTests {
     @Container
