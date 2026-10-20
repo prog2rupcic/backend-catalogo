@@ -1,0 +1,2 @@
+user default on nopass ~* +@all
+user grp_test on >test-only ~catedra:sync:* +get +hello +client
