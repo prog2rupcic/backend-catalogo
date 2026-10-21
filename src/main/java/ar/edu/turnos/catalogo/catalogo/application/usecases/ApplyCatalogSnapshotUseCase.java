@@ -1,6 +1,7 @@
 package ar.edu.turnos.catalogo.catalogo.application.usecases;
 
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogSnapshot;
+import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogValidation;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogSnapshotStore;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -19,6 +20,7 @@ public class ApplyCatalogSnapshotUseCase {
     @Transactional
     public void applyIfEmpty(CatalogSnapshot snapshot) {
         if (!store.isInitialized()) {
+            CatalogValidation.validate(snapshot, true);
             store.replace(snapshot);
         }
     }

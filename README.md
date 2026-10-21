@@ -1,6 +1,6 @@
 # backend-catalogo
 
-Servicio de catálogo y sincronización (Java 25, Spring Boot, PostgreSQL). Actualmente implementa **CAT-01**: inicialización automática desde el snapshot REST de la cátedra cuando no existe una versión local aplicada. Redis y Kafka están configurados para la próxima etapa; aún no se procesan cambios incrementales.
+Servicio de catálogo y sincronización (Java 25, Spring Boot, PostgreSQL). Implementa **CAT-01** (snapshot inicial) y **CAT-02** (incrementos Redis notificados por Kafka). La reconstrucción automática y la detección periódica de notificaciones perdidas se incorporarán en CAT-03 y CAT-04.
 
 ## Configuración
 
@@ -14,7 +14,7 @@ Se necesita Docker para ejecutar el servicio con PostgreSQL y para las pruebas c
 | `CATEDRA_TECHNICAL_JWT` | JWT técnico de cátedra; nunca se envía a la app Android. |
 | `REDIS_HOST`, `REDIS_PORT`, `REDIS_USERNAME`, `REDIS_PASSWORD` | Conexión ACL de solo lectura al catálogo Redis de cátedra. |
 | `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_CONSUMER_GROUP_ID` | Conexión y grupo de consumidores asignados por cátedra. |
-| `KAFKA_CATALOG_TOPIC` | Topic asignado para `CatalogUpdated`; no se suscribe todavía. |
+| `KAFKA_CATALOG_TOPIC` | Topic asignado para `CatalogUpdated`. |
 
 Spring no carga `.env` por sí solo: `compose.yaml` inyecta esas variables con `env_file`. Para ejecutar Spring fuera de Compose, exportarlas al entorno y usar `jdbc:postgresql://localhost:5433/catalogo` como URL de base.
 
@@ -28,11 +28,26 @@ Si falla la primera carga, el servicio queda **no inicializado** (sin fila en `c
 
 La conexión Redis tiene un indicador propio (`catalogRedis`) que ejecuta únicamente `GET catedra:sync:current-version`: el indicador predeterminado de Spring está desactivado porque la ACL de cátedra no permite los comandos `PING`/`INFO`. El indicador propio marca `UP` si puede leer una versión decimal no negativa representable como `long`; marca `DOWN` ante una clave ausente, contenido inválido, fallo de autenticación, permisos o conectividad. No publica credenciales ni mensajes internos de excepciones. Es una comprobación de acceso al catálogo remoto, no una garantía de que la versión local esté actualizada.
 
-`/actuator/health` combina este indicador con PostgreSQL y la inicialización local: puede quedar `DOWN` aunque el snapshot ya esté aplicado si falla Redis. No se exponen detalles adicionales del endpoint público. Kafka tiene bootstrap servers, consumer group y topic configurados, pero **no hay un consumidor ni se confirman offsets todavía**. La recuperación automática de cambios posteriores y de fallos transitorios se incorpora en CAT-02–CAT-04. Todavía no hay APIs de búsqueda ni una acción administrativa de sincronización.
+`/actuator/health` combina este indicador con PostgreSQL y la inicialización local: puede quedar `DOWN` aunque el snapshot ya esté aplicado si falla Redis. No se exponen detalles adicionales del endpoint público. Todavía no hay APIs de búsqueda ni una acción administrativa de sincronización.
+
+## Sincronización incremental (CAT-02)
+
+El consumidor se inicia después del arranque y solo si existe snapshot aplicado. Usa el topic y consumer group asignados por cátedra, `enable.auto.commit=false` y confirmación manual inmediata. No crea topics. Para deshabilitarlo durante una prueba aislada puede utilizarse `CATALOG_KAFKA_ENABLED=false`.
+
+1. Validar `CatalogUpdated` (`schemaVersion=1`) e ignorar campos adicionales compatibles.
+2. Si `eventId` ya existe en `processed_catalog_event`, no repetir efectos.
+3. Leer `catedra:sync:metadata`, los `changes:{version}` pendientes y las entidades vigentes de los tres hashes. Los incrementos contienen IDs, no entidades completas.
+4. Comprobar que la metadata no haya cambiado durante la lectura. Aplicar las versiones en orden, con upserts y bajas lógicas; cada transacción guarda entidades y versión. La fila de versión se bloquea durante cada escritura.
+5. Registrar el `eventId` en la transacción de la última versión del lote. Una notificación atrasada solo registra la marca, sin retroceder el catálogo. Si el proceso cae entre versiones, un replay continúa desde la última versión persistida.
+6. Confirmar el offset después de finalizar correctamente. PostgreSQL y Kafka no forman una transacción distribuida: la marca durable y la aplicación idempotente hacen seguro el replay si falla el commit del offset.
+
+La coordinación actual serializa las sincronizaciones en una instancia; no se debe desplegar más de una réplica durante esta etapa. El procesamiento requiere un historial continuo: por ejemplo, versión local `3` y `oldestAvailableVersion=4` requieren reconstrucción, no empezar en `changes:4`. Un incremento ausente, una entidad faltante o una publicación que cambia durante la lectura se señalan como `CatalogRebuildRequiredException` sin avanzar saltando versiones.
+
+**Límite temporal de CAT-02:** ante un error de lectura/escritura, evento inválido o necesidad de reconstrucción, el error handler detiene el consumidor sin confirmar el registro fallido. No hay ciclos ilimitados de reintento ni descarte automático. Revisar logs y reiniciar el servicio después de resolver el fallo permite volver a procesar desde el offset confirmado. Si el problema es una discontinuidad, reiniciar no la repara: CAT-03 implementará el snapshot de reconstrucción. CAT-04 añadirá reconciliación al inicio y periódica; CAT-07 expondrá el estado del proceso. El health actual verifica dependencias y snapshot inicial, no garantiza que el consumidor siga ejecutándose ni que el catálogo esté actualizado.
 
 ## Organización
 
-`config/CatedraIntegrationProperties` reúne los valores propios de la integración técnica utilizados por los adaptadores, sin registrar secretos en logs. Los adaptadores del slice se agrupan según su función en `catalogo/infrastructure/rest/`, `catalogo/infrastructure/persistence/jdbc/` y `catalogo/infrastructure/bootstrap/`. Los futuros lectores Redis y consumidores Kafka se ubicarán en `catalogo/infrastructure/redis/` y `catalogo/infrastructure/messaging/`; no se crean carpetas vacías. La conexión Redis y los parámetros estándar de Kafka usan las propiedades de autoconfiguración de Spring Boot.
+`config/CatedraIntegrationProperties` reúne los valores propios de la integración técnica; `config/CatalogKafkaConfiguration` define la política de errores Kafka. Los adaptadores del slice están en `catalogo/infrastructure/rest/`, `persistence/jdbc/`, `bootstrap/`, `redis/` y `messaging/`. Las reglas de validez e historial viven en dominio y los casos de uso orquestan lecturas y transacciones mediante puertos. La conexión Redis y los parámetros estándar de Kafka usan las propiedades de autoconfiguración de Spring Boot.
 
 ## Pruebas
 
@@ -42,7 +57,7 @@ Requisitos: JDK 25 y Docker en ejecución, accesible por el usuario que ejecuta 
 ./mvnw --batch-mode --no-transfer-progress verify
 ```
 
-Las pruebas usan PostgreSQL y Redis mediante Testcontainers y una respuesta REST de prueba; no necesitan acceso a cátedra ni secretos reales. Verifican el contrato del snapshot, la carga al iniciar, la conservación de bajas lógicas, el rollback y los valores de configuración Kafka sin iniciar un consumidor. Redis usa una ACL de prueba que permite la lectura contractual y prohíbe `PING` e `INFO`; se comprueba el health con versión válida, ausente o inválida y el tratamiento de fallos sin divulgar datos internos.
+Las pruebas usan PostgreSQL y Redis mediante Testcontainers, Kafka embebido solo para tests y una respuesta REST ficticia; no necesitan cátedra, ZeroTier ni secretos reales. Cubren snapshot, health con ACL restringida, lectura de cambios Redis, upserts, rollback de datos/versión/evento, orden, duplicados, historial insuficiente y confirmación posterior al caso de uso. La prueba Kafka entrega mensajes repetidos al consumidor real y verifica una sola marca persistida.
 
 ### Cobertura JaCoCo
 
