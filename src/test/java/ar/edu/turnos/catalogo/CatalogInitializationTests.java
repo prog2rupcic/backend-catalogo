@@ -2,6 +2,7 @@ package ar.edu.turnos.catalogo;
 
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogSnapshot;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.in.InitializeCatalogUseCase;
+import ar.edu.turnos.catalogo.catalogo.domain.ports.in.ApplyCatalogSnapshotUseCase;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogSnapshotSource;
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogNotification;
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogRebuildRequiredException;
@@ -81,7 +82,7 @@ class CatalogInitializationTests {
     @Autowired AtomicInteger snapshotRequests;
     @Autowired AtomicBoolean failSnapshotRequest;
     @Autowired @Qualifier("catalogInitializationHealth") HealthIndicator health;
-    @Autowired ar.edu.turnos.catalogo.catalogo.application.usecases.ApplyCatalogSnapshotUseCase applySnapshot;
+    @Autowired ApplyCatalogSnapshotUseCase applySnapshot;
     @Autowired ApplyCatalogIncrementUseCase increment;
 
     @BeforeEach
