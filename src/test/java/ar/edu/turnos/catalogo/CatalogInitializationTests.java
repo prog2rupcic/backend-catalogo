@@ -2,7 +2,11 @@ package ar.edu.turnos.catalogo;
 
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogSnapshot;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.in.InitializeCatalogUseCase;
+import ar.edu.turnos.catalogo.catalogo.domain.ports.in.ApplyCatalogSnapshotUseCase;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogSnapshotSource;
+import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogNotification;
+import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogRebuildRequiredException;
+import ar.edu.turnos.catalogo.catalogo.domain.ports.in.ApplyCatalogIncrementUseCase;
 import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalTime;
@@ -21,6 +25,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -31,8 +36,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @SpringBootTest(properties = {
         "catalog.bootstrap.enabled=false",
         "catalog.catedra.base-url=http://localhost:9999",
-        "catalog.catedra.jwt=test-only"
+        "catalog.catedra.jwt=test-only",
+        "management.health.redis.enabled=false"
 })
+@TestPropertySource("classpath:test-integration.properties")
 @Testcontainers
 class CatalogInitializationTests {
     @Container
@@ -75,7 +82,8 @@ class CatalogInitializationTests {
     @Autowired AtomicInteger snapshotRequests;
     @Autowired AtomicBoolean failSnapshotRequest;
     @Autowired @Qualifier("catalogInitializationHealth") HealthIndicator health;
-    @Autowired ar.edu.turnos.catalogo.catalogo.application.usecases.ApplyCatalogSnapshotUseCase applySnapshot;
+    @Autowired ApplyCatalogSnapshotUseCase applySnapshot;
+    @Autowired ApplyCatalogIncrementUseCase increment;
 
     @BeforeEach
     void clear() {
@@ -83,6 +91,7 @@ class CatalogInitializationTests {
         jdbc.update("DELETE FROM professional");
         jdbc.update("DELETE FROM professional_category");
         jdbc.update("DELETE FROM catalog_sync_state");
+        jdbc.update("DELETE FROM processed_catalog_event");
         snapshotRequests.set(0);
         failSnapshotRequest.set(false);
     }
@@ -136,6 +145,47 @@ class CatalogInitializationTests {
 
     private void apply(CatalogSnapshot snapshot) {
         applySnapshot.applyIfEmpty(snapshot);
+    }
+
+    @Test
+    void incrementalUpsertRetainsUnchangedRowsAndMarksEventAtomically() {
+        initialize.initializeIfEmpty();
+        var changed = new CatalogSnapshot(8,
+                List.of(new CatalogSnapshot.Category(1, "Actualizada", null, false, Instant.EPOCH, Instant.EPOCH)),
+                List.of(), List.of());
+        increment.applyAndComplete(changed, new CatalogNotification("event-8", 8));
+        increment.applyAndComplete(changed, new CatalogNotification("event-8", 8));
+
+        assertThat(jdbc.queryForObject("SELECT name FROM professional_category WHERE id=1", String.class))
+                .isEqualTo("Actualizada");
+        assertThat(count("professional")).isEqualTo(1);
+        assertThat(count("weekly_schedule")).isEqualTo(1);
+        assertThat(count("processed_catalog_event")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT applied_version FROM catalog_sync_state", Long.class)).isEqualTo(8);
+    }
+
+    @Test
+    void failedIncrementRollsBackEntitiesVersionAndEventMark() {
+        initialize.initializeIfEmpty();
+        var bad = new CatalogSnapshot(8,
+                List.of(new CatalogSnapshot.Category(1, "No debe quedar", null, true, Instant.EPOCH, Instant.EPOCH)),
+                List.of(new CatalogSnapshot.Professional(15, 999, "Ana", "Gomez", true, Instant.EPOCH, Instant.EPOCH)),
+                List.of());
+        assertThatThrownBy(() -> increment.applyAndComplete(bad, new CatalogNotification("failed-8", 8)))
+                .isInstanceOf(RuntimeException.class);
+        assertThat(jdbc.queryForObject("SELECT name FROM professional_category WHERE id=1", String.class)).isEqualTo("Clinica");
+        assertThat(jdbc.queryForObject("SELECT applied_version FROM catalog_sync_state", Long.class)).isEqualTo(7);
+        assertThat(count("processed_catalog_event")).isZero();
+    }
+
+    @Test
+    void cannotSkipVersionOrMarkAnUnfinishedEvent() {
+        initialize.initializeIfEmpty();
+        assertThatThrownBy(() -> increment.apply(new CatalogSnapshot(9, List.of(), List.of(), List.of())))
+                .isInstanceOf(CatalogRebuildRequiredException.class);
+        assertThatThrownBy(() -> increment.complete(new CatalogNotification("future", 9)))
+                .isInstanceOf(CatalogRebuildRequiredException.class);
+        assertThat(count("processed_catalog_event")).isZero();
     }
 
     private int count(String table) {

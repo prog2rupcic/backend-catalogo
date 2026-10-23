@@ -1,6 +1,7 @@
 package ar.edu.turnos.catalogo.catalogo.application.usecases;
 
 import ar.edu.turnos.catalogo.catalogo.domain.ports.in.InitializeCatalogUseCase;
+import ar.edu.turnos.catalogo.catalogo.domain.ports.in.ApplyCatalogSnapshotUseCase;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogSnapshotSource;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogSnapshotStore;
 import org.springframework.stereotype.Component;

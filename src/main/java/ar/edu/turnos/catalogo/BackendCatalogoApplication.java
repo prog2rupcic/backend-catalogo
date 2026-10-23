@@ -2,8 +2,10 @@ package ar.edu.turnos.catalogo;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 
 @SpringBootApplication
+@ConfigurationPropertiesScan("ar.edu.turnos.catalogo.config")
 public class BackendCatalogoApplication {
 
 	public static void main(String[] args) {
