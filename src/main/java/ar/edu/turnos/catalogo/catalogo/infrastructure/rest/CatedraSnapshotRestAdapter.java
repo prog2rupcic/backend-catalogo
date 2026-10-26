@@ -1,5 +1,6 @@
-package ar.edu.turnos.catalogo.catalogo.infrastructure.catedra;
+package ar.edu.turnos.catalogo.catalogo.infrastructure.rest;
 
+import ar.edu.turnos.catalogo.config.CatedraIntegrationProperties;
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogSnapshot;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogSnapshotSource;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
@@ -8,26 +9,21 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalTime;
 import java.util.List;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
-//Implementa CatalogSnapshotSource: llama al endpoint contractual con el JWT técnico, interpreta el JSON y lo transforma al modelo del dominio.
-// Los DTO de la cátedra viven aquí para que no se filtren al dominio.
 @Component
-public class CatedraSnapshotAdapter implements CatalogSnapshotSource {
+public class CatedraSnapshotRestAdapter implements CatalogSnapshotSource {
     private final RestClient restClient;
 
-    public CatedraSnapshotAdapter(RestClient.Builder builder,
-                                  @Value("${catalog.catedra.base-url}") String baseUrl,
-                                  @Value("${catalog.catedra.jwt}") String jwt) {
+    public CatedraSnapshotRestAdapter(RestClient.Builder builder, CatedraIntegrationProperties properties) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofSeconds(5));
         factory.setReadTimeout(Duration.ofSeconds(15));
-        this.restClient = builder.baseUrl(baseUrl).requestFactory(factory)
-                .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + jwt).build();
+        this.restClient = builder.baseUrl(properties.getBaseUrl().toString()).requestFactory(factory)
+                .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + properties.getJwt()).build();
     }
 
     @Override
