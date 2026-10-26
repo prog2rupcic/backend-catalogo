@@ -7,12 +7,21 @@ import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogSnapshotSource;
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogNotification;
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogRebuildRequiredException;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.in.ApplyCatalogIncrementUseCase;
+import ar.edu.turnos.catalogo.catalogo.domain.ports.in.RebuildCatalogUseCase;
+import ar.edu.turnos.catalogo.catalogo.domain.ports.in.SynchronizeCatalogUseCase;
+import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogChangesSource;
+import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogIncrementStore;
+import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogSnapshotStore;
+import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogHistory;
+import ar.edu.turnos.catalogo.catalogo.application.usecases.SynchronizeCatalogUseCaseImpl;
 import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalTime;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -65,14 +74,36 @@ class CatalogInitializationTests {
         }
 
         @Bean
+        AtomicReference<CatalogSnapshot> remoteSnapshot() {
+            return new AtomicReference<>(snapshot(false));
+        }
+
+        @Bean
+        AtomicReference<CatalogHistory> remoteHistory() {
+            return new AtomicReference<>(new CatalogHistory(12, 10));
+        }
+
+        @Bean
         @Primary
-        CatalogSnapshotSource snapshotSource(AtomicInteger requests, AtomicBoolean fail) {
+        CatalogChangesSource historySource(AtomicReference<CatalogHistory> remoteHistory) {
+            return new CatalogChangesSource() {
+                public CatalogHistory history() { return remoteHistory.get(); }
+                public CatalogSnapshot changes(long version) {
+                    return new CatalogSnapshot(version, List.of(), List.of(), List.of());
+                }
+            };
+        }
+
+        @Bean
+        @Primary
+        CatalogSnapshotSource snapshotSource(AtomicInteger requests, AtomicBoolean fail,
+                                             AtomicReference<CatalogSnapshot> remoteSnapshot) {
             return () -> {
                 requests.incrementAndGet();
                 if (fail.get()) {
                     throw new IllegalStateException("Catedra no disponible");
                 }
-                return snapshot(false);
+                return remoteSnapshot.get();
             };
         }
     }
@@ -84,6 +115,13 @@ class CatalogInitializationTests {
     @Autowired @Qualifier("catalogInitializationHealth") HealthIndicator health;
     @Autowired ApplyCatalogSnapshotUseCase applySnapshot;
     @Autowired ApplyCatalogIncrementUseCase increment;
+    @Autowired SynchronizeCatalogUseCase sync;
+    @Autowired RebuildCatalogUseCase rebuild;
+    @Autowired CatalogChangesSource changes;
+    @Autowired CatalogIncrementStore incrementStore;
+    @Autowired CatalogSnapshotStore snapshotStore;
+    @Autowired AtomicReference<CatalogSnapshot> remoteSnapshot;
+    @Autowired AtomicReference<CatalogHistory> remoteHistory;
 
     @BeforeEach
     void clear() {
@@ -94,6 +132,8 @@ class CatalogInitializationTests {
         jdbc.update("DELETE FROM processed_catalog_event");
         snapshotRequests.set(0);
         failSnapshotRequest.set(false);
+        remoteSnapshot.set(snapshot(false));
+        remoteHistory.set(new CatalogHistory(12, 10));
     }
 
     @Test
@@ -186,6 +226,75 @@ class CatalogInitializationTests {
         assertThatThrownBy(() -> increment.complete(new CatalogNotification("future", 9)))
                 .isInstanceOf(CatalogRebuildRequiredException.class);
         assertThat(count("processed_catalog_event")).isZero();
+    }
+
+    @Test
+    void reconstructionReplacesAllCollectionsAndPreservesPreviousEventMarks() {
+        initialize.initializeIfEmpty();
+        increment.complete(new CatalogNotification("already-processed", 7));
+        var rebuilt = new CatalogSnapshot(10,
+                List.of(new CatalogSnapshot.Category(2, "Otra categoria", null, false, Instant.EPOCH, Instant.EPOCH)),
+                List.of(), List.of());
+        applySnapshot.replace(rebuilt, 9, Optional.of(new CatalogNotification("rebuilt", 9)));
+
+        assertThat(count("professional_category")).isEqualTo(1);
+        assertThat(count("professional")).isZero();
+        assertThat(count("weekly_schedule")).isZero();
+        assertThat(count("processed_catalog_event")).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT applied_version FROM catalog_sync_state", Long.class)).isEqualTo(10);
+    }
+
+    @Test
+    void failedReplacementRestoresPreviousDataVersionAndEventHistory() {
+        initialize.initializeIfEmpty();
+        increment.complete(new CatalogNotification("previous", 7));
+        var rebuilt = new CatalogSnapshot(9, snapshot(false).categories(),
+                List.of(new CatalogSnapshot.Professional(15, 1, null, "Gomez", true, Instant.EPOCH, Instant.EPOCH)),
+                List.of());
+
+        assertThatThrownBy(() -> applySnapshot.replace(rebuilt, 9,
+                Optional.of(new CatalogNotification("must-not-persist", 9)))).isInstanceOf(RuntimeException.class);
+        assertThat(count("professional_category")).isEqualTo(1);
+        assertThat(count("professional")).isEqualTo(1);
+        assertThat(count("weekly_schedule")).isEqualTo(1);
+        assertThat(count("processed_catalog_event")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT applied_version FROM catalog_sync_state", Long.class)).isEqualTo(7);
+    }
+
+    @Test
+    void staleSnapshotCannotRegressLocalVersionOrCompleteFutureEvent() {
+        initialize.initializeIfEmpty();
+        var stale = new CatalogSnapshot(6, List.of(), List.of(), List.of());
+        assertThatThrownBy(() -> applySnapshot.replace(stale, 0, Optional.empty()))
+                .isInstanceOf(CatalogRebuildRequiredException.class);
+        assertThatThrownBy(() -> applySnapshot.replace(snapshot(false), 7,
+                Optional.of(new CatalogNotification("future", 8))))
+                .isInstanceOf(CatalogRebuildRequiredException.class);
+        assertThat(count("professional")).isEqualTo(1);
+        assertThat(count("processed_catalog_event")).isZero();
+        assertThat(jdbc.queryForObject("SELECT applied_version FROM catalog_sync_state", Long.class)).isEqualTo(7);
+    }
+
+    @Test
+    void discontinuityRebuildsOnceAndNewCoordinatorResumesFromPersistedVersion() {
+        initialize.initializeIfEmpty();
+        var data = snapshot(false);
+        remoteSnapshot.set(new CatalogSnapshot(12, data.categories(), data.professionals(), data.schedules()));
+        var event = new CatalogNotification("rebuild-12", 12);
+        sync.synchronize(event);
+        sync.synchronize(event);
+        assertThat(snapshotRequests).hasValue(2); // Una carga inicial y una reconstrucción.
+        assertThat(count("processed_catalog_event")).isEqualTo(1);
+        assertThat(incrementStore.appliedVersion()).isEqualTo(12);
+
+        // Simular un coordinador nuevo sobre la misma persistencia, como al reiniciar.
+        var restarted = new SynchronizeCatalogUseCaseImpl(changes, incrementStore, increment,
+                snapshotStore, initialize, rebuild);
+        remoteHistory.set(new CatalogHistory(14, 10));
+        restarted.reconcile();
+        assertThat(incrementStore.appliedVersion()).isEqualTo(14);
+        assertThat(snapshotRequests).hasValue(2);
+        assertThat(count("processed_catalog_event")).isEqualTo(1);
     }
 
     private int count(String table) {

@@ -1,6 +1,6 @@
 # backend-catalogo
 
-Servicio de catálogo y sincronización (Java 25, Spring Boot, PostgreSQL). Implementa **CAT-01** (snapshot inicial) y **CAT-02** (incrementos Redis notificados por Kafka). La reconstrucción automática y la detección periódica de notificaciones perdidas se incorporarán en CAT-03 y CAT-04.
+Servicio de catálogo y sincronización (Java 25, Spring Boot, PostgreSQL). Implementa **CAT-01** (snapshot inicial), **CAT-02** (incrementos Redis notificados por Kafka), **CAT-03** (reconstrucción) y **CAT-04** (reconciliación al iniciar y periódica). Las APIs de búsqueda, agenda y diagnóstico autorizado continúan en sus issues respectivos.
 
 ## Configuración
 
@@ -15,6 +15,10 @@ Se necesita Docker para ejecutar el servicio con PostgreSQL y para las pruebas c
 | `REDIS_HOST`, `REDIS_PORT`, `REDIS_USERNAME`, `REDIS_PASSWORD` | Conexión ACL de solo lectura al catálogo Redis de cátedra. |
 | `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_CONSUMER_GROUP_ID` | Conexión y grupo de consumidores asignados por cátedra. |
 | `KAFKA_CATALOG_TOPIC` | Topic asignado para `CatalogUpdated`. |
+| `CATALOG_RECONCILIATION_ENABLED` | Habilita el scheduler; por defecto `true`. No desactiva la reconciliación de arranque. |
+| `CATALOG_RECONCILIATION_INTERVAL` | Espera entre ciclos periódicos, desde el final del anterior; por defecto `60s`, debe ser positiva. |
+| `CATALOG_RECONCILIATION_MAX_ATTEMPTS` | Intentos por ciclo: de 1 a 5, por defecto 3. |
+| `CATALOG_RECONCILIATION_RETRY_DELAY` | Espera inicial del backoff exponencial, positiva y hasta `10s`; por defecto `1s`. |
 
 Spring no carga `.env` por sí solo: `compose.yaml` inyecta esas variables con `env_file`. Para ejecutar Spring fuera de Compose, exportarlas al entorno y usar `jdbc:postgresql://localhost:5433/catalogo` como URL de base.
 
@@ -22,9 +26,9 @@ Spring no carga `.env` por sí solo: `compose.yaml` inyecta esas variables con `
 docker compose up --build
 ```
 
-Compose levanta solo este servicio y su PostgreSQL; **REST, Redis y Kafka de cátedra son externos** y deben ser accesibles desde el contenedor (por ejemplo, con ZeroTier activo). Flyway crea el esquema al iniciar. Si la base no tiene versión aplicada, se solicita `GET /api/synchronization/snapshot` con el JWT técnico y se guarda el catálogo y `snapshotVersion` en una transacción. Las entidades deshabilitadas se conservan. Tras una carga correcta, un reinicio no vuelve a descargar el snapshot.
+Compose levanta solo este servicio y su PostgreSQL; **REST, Redis y Kafka de cátedra son externos** y deben ser accesibles desde el contenedor (por ejemplo, con ZeroTier activo). Flyway crea el esquema al iniciar. Si la base no tiene versión aplicada, se solicita `GET /api/synchronization/snapshot` con el JWT técnico y se guarda el catálogo y `snapshotVersion` en una transacción. Las entidades deshabilitadas se conservan. En cada arranque se compara además la versión local con la publicada: reiniciar no descarga un snapshot innecesario si el catálogo ya está actualizado, pero sí recupera el atraso.
 
-Si falla la primera carga, el servicio queda **no inicializado** (sin fila en `catalog_sync_state`). El indicador propio de inicialización marca `DOWN` y `/actuator/health` responde con estado general `DOWN`; el error se registra sin imprimir credenciales. Un nuevo arranque puede volver a intentar la carga. La versión aplicada puede verificarse en `catalog_sync_state`.
+Si falla la primera carga, el servicio queda **no inicializado** (sin fila en `catalog_sync_state`). El indicador propio de inicialización marca `DOWN` y `/actuator/health` responde con estado general `DOWN`; el error se registra sin imprimir credenciales. Los ciclos posteriores pueden recuperar la carga sin reiniciar manualmente. La versión aplicada puede verificarse en `catalog_sync_state`.
 
 La conexión Redis tiene un indicador propio (`catalogRedis`) que ejecuta únicamente `GET catedra:sync:current-version`: el indicador predeterminado de Spring está desactivado porque la ACL de cátedra no permite los comandos `PING`/`INFO`. El indicador propio marca `UP` si puede leer una versión decimal no negativa representable como `long`; marca `DOWN` ante una clave ausente, contenido inválido, fallo de autenticación, permisos o conectividad. No publica credenciales ni mensajes internos de excepciones. Es una comprobación de acceso al catálogo remoto, no una garantía de que la versión local esté actualizada.
 
@@ -32,7 +36,7 @@ La conexión Redis tiene un indicador propio (`catalogRedis`) que ejecuta única
 
 ## Sincronización incremental (CAT-02)
 
-El consumidor se inicia después del arranque y solo si existe snapshot aplicado. Usa el topic y consumer group asignados por cátedra, `enable.auto.commit=false` y confirmación manual inmediata. No crea topics. Para deshabilitarlo durante una prueba aislada puede utilizarse `CATALOG_KAFKA_ENABLED=false`.
+El consumidor se inicia después de una reconciliación exitosa, incluida la inicialización cuando sea necesaria. Usa el topic y consumer group asignados por cátedra, `enable.auto.commit=false` y confirmación manual inmediata. No crea topics. Para deshabilitarlo durante una prueba aislada puede utilizarse `CATALOG_KAFKA_ENABLED=false`.
 
 1. Validar `CatalogUpdated` (`schemaVersion=1`) e ignorar campos adicionales compatibles.
 2. Si `eventId` ya existe en `processed_catalog_event`, no repetir efectos.
@@ -41,9 +45,21 @@ El consumidor se inicia después del arranque y solo si existe snapshot aplicado
 5. Registrar el `eventId` en la transacción de la última versión del lote. Una notificación atrasada solo registra la marca, sin retroceder el catálogo. Si el proceso cae entre versiones, un replay continúa desde la última versión persistida.
 6. Confirmar el offset después de finalizar correctamente. PostgreSQL y Kafka no forman una transacción distribuida: la marca durable y la aplicación idempotente hacen seguro el replay si falla el commit del offset.
 
-La coordinación actual serializa las sincronizaciones en una instancia; no se debe desplegar más de una réplica durante esta etapa. El procesamiento requiere un historial continuo: por ejemplo, versión local `3` y `oldestAvailableVersion=4` requieren reconstrucción, no empezar en `changes:4`. Un incremento ausente, una entidad faltante o una publicación que cambia durante la lectura se señalan como `CatalogRebuildRequiredException` sin avanzar saltando versiones.
+El procesamiento requiere un historial continuo: por ejemplo, versión local `3` y `oldestAvailableVersion=4` requieren reconstrucción, no empezar en `changes:4`. Un incremento ausente, una entidad faltante, una incompatibilidad con las referencias locales o una publicación que cambia durante la lectura requieren recuperación, nunca saltar versiones.
 
-**Límite temporal de CAT-02:** ante un error de lectura/escritura, evento inválido o necesidad de reconstrucción, el error handler detiene el consumidor sin confirmar el registro fallido. No hay ciclos ilimitados de reintento ni descarte automático. Revisar logs y reiniciar el servicio después de resolver el fallo permite volver a procesar desde el offset confirmado. Si el problema es una discontinuidad, reiniciar no la repara: CAT-03 implementará el snapshot de reconstrucción. CAT-04 añadirá reconciliación al inicio y periódica; CAT-07 expondrá el estado del proceso. El health actual verifica dependencias y snapshot inicial, no garantiza que el consumidor siga ejecutándose ni que el catálogo esté actualizado.
+## Reconstrucción y reconciliación (CAT-03 y CAT-04)
+
+`SynchronizeCatalogUseCase` coordina tres disparadores: arranque, evento Kafka y scheduler. El mismo monitor serializa la inicialización, los incrementos y la reconstrucción en **una instancia**. No desplegar varias réplicas de este servicio con esta coordinación local.
+
+- La reconciliación consulta la metadata Redis incluso sin eventos. Si las versiones coinciden no escribe; si hay historial continuo aplica incrementos; de lo contrario solicita un snapshot REST. La tarea periódica no inventa `eventId` ni marcas Kafka.
+- El snapshot se descarga fuera de la transacción. Antes de reemplazar se valida y se exige que cubra, como mínimo, la versión local, la versión remota observada y la del evento que lo motivó. Si Redis retrocede, no se retrocede la copia: se intenta verificar mediante un snapshot que respete ese mínimo. Un snapshot obsoleto se rechaza y puede reintentarse más adelante.
+- Categorías, profesionales, horarios y versión se reemplazan en una sola transacción, conservando el estado anterior si algo falla. Si la reconstrucción responde a Kafka, su marca de evento se guarda en la misma transacción; las marcas anteriores se conservan.
+- Un ciclo usa por defecto hasta tres intentos con backoff de 1 y 2 segundos. Las esperas quedan fuera del monitor de sincronización y de las transacciones. Al agotar intentos, el siguiente ciclo periódico vuelve a comprobar el estado. El intervalo usa `fixedDelay` (60 segundos por defecto); los ciclos periódicos no se solapan.
+- Un fallo de conexión/base, HTTP 408/429/5xx o snapshot temporalmente obsoleto es reintentable. Una entrada inválida o HTTP 4xx permanente no se reintenta dentro de ese ciclo. Los logs registran intento, resultado y tipo del error, sin payloads ni credenciales.
+- Kafka confirma solamente al terminar correctamente. Ante un fallo recuperable se detiene sin confirmar el registro; después de una reconciliación exitosa se reanuda y hace replay desde el offset confirmado. La idempotencia permite que el catálogo ya esté actualizado cuando llegue ese replay.
+- Un evento inválido bloquea la reanudación automática del consumidor en esa ejecución: no se descarta ni se confirma silenciosamente y no se crea un bucle de reinicios. Requiere diagnóstico/corrección operativa. La reconciliación periódica del catálogo puede continuar independientemente.
+
+Al reiniciar, la versión y las marcas persistidas permiten retomar el progreso, y se compara nuevamente con cátedra. No existe una acción administrativa HTTP para sincronizar. `catalog.bootstrap.enabled=false` desactiva la comprobación inicial, y `catalog.reconciliation.enabled=false` desactiva las siguientes; en producción se mantienen ambas activadas. CAT-07 agregará el diagnóstico autorizado; el health actual no garantiza que Kafka esté ejecutándose o que la copia esté al día.
 
 ## Organización
 
@@ -57,7 +73,7 @@ Requisitos: JDK 25 y Docker en ejecución, accesible por el usuario que ejecuta 
 ./mvnw --batch-mode --no-transfer-progress verify
 ```
 
-Las pruebas usan PostgreSQL y Redis mediante Testcontainers, Kafka embebido solo para tests y una respuesta REST ficticia; no necesitan cátedra, ZeroTier ni secretos reales. Cubren snapshot, health con ACL restringida, lectura de cambios Redis, upserts, rollback de datos/versión/evento, orden, duplicados, historial insuficiente y confirmación posterior al caso de uso. La prueba Kafka entrega mensajes repetidos al consumidor real y verifica una sola marca persistida.
+Las pruebas usan PostgreSQL y Redis mediante Testcontainers, Kafka embebido solo para tests y fuentes remotas ficticias; no necesitan cátedra, ZeroTier ni secretos reales. Cubren snapshot, ACL restringida, incrementos, rollback de datos/versión/evento, orden, duplicados, reconstrucción y rechazo de snapshots obsoletos. Un scheduler real recupera una carga inicial fallida y detecta cambios sin Kafka; también se verifica exclusión mutua, intentos limitados e interrupción del backoff. Kafka prueba replay tras recuperación y que un mensaje inválido no provoque reinicios automáticos. Un coordinador nuevo sobre la persistencia existente verifica la reanudación del progreso.
 
 ### Cobertura JaCoCo
 

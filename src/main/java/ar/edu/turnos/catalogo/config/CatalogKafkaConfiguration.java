@@ -6,7 +6,7 @@ import org.springframework.kafka.listener.CommonContainerStoppingErrorHandler;
 
 @Configuration
 public class CatalogKafkaConfiguration {
-    /** No descartar ni confirmar un registro fallido: detener y permitir replay al reiniciar. */
+    /** No confirmar registros fallidos: el reconciliador reanuda solo fallos recuperables. */
     @Bean
     CommonContainerStoppingErrorHandler catalogKafkaErrorHandler() {
         return new CommonContainerStoppingErrorHandler();
