@@ -5,6 +5,7 @@ import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogSnapshot;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogSnapshotSource;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogChangesSource;
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogRebuildRequiredException;
+import ar.edu.turnos.catalogo.catalogo.infrastructure.bootstrap.CatalogReconciliationJob;
 import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.BeforeAll;
@@ -20,6 +21,7 @@ import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.test.context.EmbeddedKafka;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
@@ -60,8 +62,9 @@ class CatalogStartupTests {
 
     @BeforeAll
     static void seedVersion() throws Exception {
-        setVersion("1");
-        seedChanges();
+        setVersion("3");
+        redis.execInContainer("redis-cli", "HSET", "catedra:sync:metadata",
+                "currentVersion", "3", "oldestAvailableVersion", "1");
     }
 
     private static void setVersion(String value) throws Exception {
@@ -97,6 +100,8 @@ class CatalogStartupTests {
     @Autowired @Qualifier("catalogRedisHealthIndicator") HealthIndicator redisHealth;
     @Autowired CatalogChangesSource changes;
     @Autowired KafkaTemplate<String, String> kafkaTemplate;
+    @Autowired KafkaListenerEndpointRegistry listeners;
+    @Autowired CatalogReconciliationJob reconciliation;
 
     @Test
     @Order(1)
@@ -123,7 +128,7 @@ class CatalogStartupTests {
         seedChanges();
         assertThat(changes.history().currentVersion()).isEqualTo(4);
         assertThat(changes.changes(4).categories().getFirst().enabled()).isFalse();
-        assertThatThrownBy(() -> changes.changes(5)).isInstanceOf(CatalogRebuildRequiredException.class);
+        assertThatThrownBy(() -> changes.changes(999)).isInstanceOf(CatalogRebuildRequiredException.class);
     }
 
     private static void seedChanges() throws Exception {
@@ -141,6 +146,7 @@ class CatalogStartupTests {
     @Test
     @Order(2)
     void kafkaDeliveryIsPersistedOnceDespiteDuplicateMessages() throws Exception {
+        seedChanges();
         String payload = """
                 {"eventId":"kafka-4","eventType":"CatalogUpdated","newVersion":4,"schemaVersion":1}
                 """;
@@ -152,6 +158,47 @@ class CatalogStartupTests {
                 assertThat(jdbc.queryForObject("SELECT applied_version FROM catalog_sync_state", Long.class)).isEqualTo(4);
                 assertThat(jdbc.queryForObject("SELECT enabled FROM professional_category WHERE id=1", Boolean.class)).isFalse();
         });
+    }
+
+    @Test
+    @Order(3)
+    void failedKafkaEventIsReplayedAfterReconciliationRestartsConsumer() throws Exception {
+        // No changes:5 y snapshot REST de la fixture obsoleto: no se puede confirmar.
+        redis.execInContainer("redis-cli", "HSET", "catedra:sync:metadata", "currentVersion", "5");
+        kafkaTemplate.send("catedra.catalog.test", "5", """
+                {"eventId":"kafka-5","eventType":"CatalogUpdated","newVersion":5,"schemaVersion":1}
+                """).get();
+        var container = listeners.getListenerContainer("catalog-updates");
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(20))
+                .until(() -> !container.isRunning());
+        assertThat(jdbc.queryForObject("SELECT applied_version FROM catalog_sync_state", Long.class)).isEqualTo(4);
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM processed_catalog_event WHERE event_id='kafka-5'", Integer.class)).isZero();
+
+        redis.execInContainer("redis-cli", "SET", "catedra:sync:changes:5", """
+                {"version":5,"changes":{"professionalCategories":[],"professionals":[],"weeklySchedules":[]}}
+                """);
+        reconciliation.runCycle();
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+            assertThat(jdbc.queryForObject("SELECT applied_version FROM catalog_sync_state", Long.class)).isEqualTo(5);
+            assertThat(jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM processed_catalog_event WHERE event_id='kafka-5'", Integer.class)).isEqualTo(1);
+        });
+    }
+
+    @Test
+    @Order(4)
+    void invalidKafkaMessageStaysStoppedEvenAfterSuccessfulReconciliation() throws Exception {
+        kafkaTemplate.send("catedra.catalog.test", "5", """
+                {"eventId":"invalid","eventType":"CatalogUpdated","newVersion":5,"schemaVersion":99}
+                """).get();
+        var container = listeners.getListenerContainer("catalog-updates");
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(20))
+                .until(() -> !container.isRunning());
+        reconciliation.runCycle();
+        assertThat(container.isRunning()).isFalse();
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM processed_catalog_event WHERE event_id='invalid'", Integer.class)).isZero();
     }
 
     @Test

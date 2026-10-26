@@ -7,6 +7,7 @@ import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogRebuildRequiredExcept
 import java.sql.Timestamp;
 import java.time.Instant;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -30,11 +31,19 @@ public class CatalogSnapshotJdbcAdapter implements CatalogSnapshotStore, Catalog
         jdbc.update("DELETE FROM professional");
         jdbc.update("DELETE FROM professional_category");
 
-        upsert(snapshot);
+        write(snapshot);
     }
 
     @Override
     public void upsert(CatalogSnapshot snapshot) {
+        try {
+            write(snapshot);
+        } catch (DataIntegrityViolationException e) {
+            throw new CatalogRebuildRequiredException("Incremento incompatible con la copia local");
+        }
+    }
+
+    private void write(CatalogSnapshot snapshot) {
         for (CatalogSnapshot.Category c : snapshot.categories()) {
             jdbc.update("INSERT INTO professional_category (id, name, description, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, description=EXCLUDED.description, enabled=EXCLUDED.enabled, created_at=EXCLUDED.created_at, updated_at=EXCLUDED.updated_at",
                     c.id(), c.name(), c.description(), c.enabled(), Timestamp.from(c.createdAt()), Timestamp.from(c.updatedAt()));
