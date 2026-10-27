@@ -8,11 +8,13 @@ import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogNotification;
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogRebuildRequiredException;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.in.ApplyCatalogIncrementUseCase;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.in.RebuildCatalogUseCase;
+import ar.edu.turnos.catalogo.catalogo.domain.ports.in.CatalogDiagnosticsUseCase;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.in.SynchronizeCatalogUseCase;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogChangesSource;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogIncrementStore;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogSnapshotStore;
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogHistory;
+import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogDiagnostic;
 import ar.edu.turnos.catalogo.catalogo.application.usecases.SynchronizeCatalogUseCaseImpl;
 import java.time.DayOfWeek;
 import java.time.Instant;
@@ -117,6 +119,7 @@ class CatalogInitializationTests {
     @Autowired ApplyCatalogIncrementUseCase increment;
     @Autowired SynchronizeCatalogUseCase sync;
     @Autowired RebuildCatalogUseCase rebuild;
+    @Autowired CatalogDiagnosticsUseCase diagnostics;
     @Autowired CatalogChangesSource changes;
     @Autowired CatalogIncrementStore incrementStore;
     @Autowired CatalogSnapshotStore snapshotStore;
@@ -130,6 +133,9 @@ class CatalogInitializationTests {
         jdbc.update("DELETE FROM professional_category");
         jdbc.update("DELETE FROM catalog_sync_state");
         jdbc.update("DELETE FROM processed_catalog_event");
+        jdbc.update("UPDATE catalog_diagnostics SET attempt_id=NULL, source=NULL, activity='IDLE', "
+                + "outcome='UNINITIALIZED', started_at=NULL, finished_at=NULL, last_success_at=NULL, "
+                + "remote_version=NULL, remote_observed_at=NULL, last_error_code=NULL, last_error_at=NULL WHERE id=1");
         snapshotRequests.set(0);
         failSnapshotRequest.set(false);
         remoteSnapshot.set(snapshot(false));
@@ -289,12 +295,61 @@ class CatalogInitializationTests {
 
         // Simular un coordinador nuevo sobre la misma persistencia, como al reiniciar.
         var restarted = new SynchronizeCatalogUseCaseImpl(changes, incrementStore, increment,
-                snapshotStore, initialize, rebuild);
+                snapshotStore, initialize, rebuild, diagnostics);
         remoteHistory.set(new CatalogHistory(14, 10));
         restarted.reconcile();
         assertThat(incrementStore.appliedVersion()).isEqualTo(14);
         assertThat(snapshotRequests).hasValue(2);
         assertThat(count("processed_catalog_event")).isEqualTo(1);
+    }
+
+    @Test
+    void diagnosticSurvivesFailureAndRestartWithoutChangingCatalogVersion() {
+        initialize.initializeIfEmpty();
+        var first = diagnostics.begin(CatalogDiagnostic.Source.PERIODIC);
+        diagnostics.observed(7);
+        diagnostics.succeed(first);
+        var success = diagnostics.status();
+        assertThat(success.appliedVersion()).isEqualTo(7);
+        assertThat(success.outcome()).isEqualTo(CatalogDiagnostic.Outcome.CURRENT);
+        assertThat(success.kafka()).isEqualTo(CatalogDiagnostic.KafkaState.DISABLED);
+
+        var failure = diagnostics.begin(CatalogDiagnostic.Source.KAFKA);
+        diagnostics.observed(8);
+        diagnostics.fail(failure, CatalogDiagnostic.ErrorCode.REBUILD_REQUIRED);
+        var failed = diagnostics.status();
+        assertThat(failed.outcome()).isEqualTo(CatalogDiagnostic.Outcome.ERROR);
+        assertThat(failed.lastSuccessAt()).isEqualTo(success.lastSuccessAt());
+        assertThat(failed.lastErrorCode()).isEqualTo(CatalogDiagnostic.ErrorCode.REBUILD_REQUIRED);
+        assertThat(failed.appliedVersion()).isEqualTo(7);
+
+        var interrupted = diagnostics.begin(CatalogDiagnostic.Source.PERIODIC);
+        diagnostics.activity(CatalogDiagnostic.Activity.REBUILDING);
+        diagnostics.recoverInterrupted();
+        assertThat(diagnostics.status().attemptId()).isEqualTo(interrupted);
+        assertThat(diagnostics.status().outcome()).isEqualTo(CatalogDiagnostic.Outcome.INTERRUPTED);
+        assertThat(diagnostics.status().activity()).isEqualTo(CatalogDiagnostic.Activity.IDLE);
+        assertThat(diagnostics.status().lastSuccessAt()).isEqualTo(success.lastSuccessAt());
+    }
+
+    @Test
+    void oldAttemptCannotOverrideLaterResultAndFailureDiagnosticsSurviveCatalogRollback() {
+        initialize.initializeIfEmpty();
+        var old = diagnostics.begin(CatalogDiagnostic.Source.PERIODIC);
+        var current = diagnostics.begin(CatalogDiagnostic.Source.KAFKA);
+        diagnostics.observed(9);
+        var bad = new CatalogSnapshot(9, snapshot(false).categories(),
+                List.of(new CatalogSnapshot.Professional(15, 1, null, "Gomez", true, Instant.EPOCH, Instant.EPOCH)),
+                List.of());
+        assertThatThrownBy(() -> applySnapshot.replace(bad, 9, Optional.empty()))
+                .isInstanceOf(RuntimeException.class);
+        diagnostics.fail(old, CatalogDiagnostic.ErrorCode.OTHER);
+        diagnostics.fail(current, CatalogDiagnostic.ErrorCode.PERSISTENCE_UNAVAILABLE);
+        assertThat(diagnostics.status().attemptId()).isEqualTo(current);
+        assertThat(diagnostics.status().lastErrorCode())
+                .isEqualTo(CatalogDiagnostic.ErrorCode.PERSISTENCE_UNAVAILABLE);
+        assertThat(diagnostics.status().appliedVersion()).isEqualTo(7);
+        assertThat(count("professional")).isEqualTo(1);
     }
 
     private int count(String table) {
