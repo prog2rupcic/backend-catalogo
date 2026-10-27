@@ -1,7 +1,10 @@
 package ar.edu.turnos.catalogo.catalogo.infrastructure.messaging;
 
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogNotification;
+import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogDiagnostic;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.in.SynchronizeCatalogUseCase;
+import ar.edu.turnos.catalogo.catalogo.infrastructure.bootstrap.CatalogDiagnosticsRecorder;
+import ar.edu.turnos.catalogo.catalogo.infrastructure.bootstrap.CatalogSynchronizationMonitor;
 import org.junit.jupiter.api.Test;
 import org.springframework.kafka.support.Acknowledgment;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -11,7 +14,9 @@ class CatalogUpdatedKafkaListenerTests {
     final SynchronizeCatalogUseCase sync = mock(SynchronizeCatalogUseCase.class);
     final Acknowledgment ack = mock(Acknowledgment.class);
     final CatalogKafkaLifecycle lifecycle = mock(CatalogKafkaLifecycle.class);
-    final CatalogUpdatedKafkaListener listener = new CatalogUpdatedKafkaListener(sync, lifecycle);
+    final CatalogDiagnosticsRecorder diagnostics = mock(CatalogDiagnosticsRecorder.class);
+    final CatalogUpdatedKafkaListener listener = new CatalogUpdatedKafkaListener(sync, lifecycle,
+            diagnostics, new CatalogSynchronizationMonitor());
     final String payload = """
             {"eventId":"e4","eventType":"CatalogUpdated","newVersion":4,"schemaVersion":1,"extra":"compatible"}
             """;
@@ -22,6 +27,8 @@ class CatalogUpdatedKafkaListenerTests {
         var order = inOrder(sync, ack);
         order.verify(sync).synchronize(new CatalogNotification("e4", 4));
         order.verify(ack).acknowledge();
+        verify(diagnostics).begin(CatalogDiagnostic.Source.KAFKA);
+        verify(diagnostics).succeed(isNull());
     }
 
     @Test
@@ -31,5 +38,6 @@ class CatalogUpdatedKafkaListenerTests {
         assertThatThrownBy(() -> listener.receive(payload.replace("\"schemaVersion\":1", "\"schemaVersion\":2"), ack))
                 .isInstanceOf(IllegalArgumentException.class);
         verifyNoInteractions(ack);
+        verify(diagnostics, times(2)).fail(isNull(), any());
     }
 }
