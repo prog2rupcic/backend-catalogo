@@ -3,6 +3,7 @@ package ar.edu.turnos.catalogo.catalogo.application.usecases;
 import ar.edu.turnos.catalogo.catalogo.domain.model.*;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.in.ApplyCatalogIncrementUseCase;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.in.InitializeCatalogUseCase;
+import ar.edu.turnos.catalogo.catalogo.domain.ports.in.CatalogDiagnosticsUseCase;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.in.RebuildCatalogUseCase;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogChangesSource;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogIncrementStore;
@@ -29,8 +30,9 @@ class SynchronizeCatalogTests {
     final CatalogSnapshotStore snapshots = mock(CatalogSnapshotStore.class);
     final InitializeCatalogUseCase initialize = mock(InitializeCatalogUseCase.class);
     final RebuildCatalogUseCase rebuild = mock(RebuildCatalogUseCase.class);
+    final CatalogDiagnosticsUseCase diagnostics = mock(CatalogDiagnosticsUseCase.class);
     final SynchronizeCatalogUseCaseImpl sync = new SynchronizeCatalogUseCaseImpl(source, store, apply,
-            snapshots, initialize, rebuild);
+            snapshots, initialize, rebuild, diagnostics);
     final CatalogNotification event = new CatalogNotification("event", 4);
 
     @BeforeEach
