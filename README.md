@@ -61,6 +61,14 @@ El procesamiento requiere un historial continuo: por ejemplo, versión local `3`
 
 Al reiniciar, la versión y las marcas persistidas permiten retomar el progreso, y se compara nuevamente con cátedra. No existe una acción administrativa HTTP para sincronizar. `catalog.bootstrap.enabled=false` desactiva la comprobación inicial, y `catalog.reconciliation.enabled=false` desactiva las siguientes; en producción se mantienen ambas activadas. CAT-07 agregará el diagnóstico autorizado; el health actual no garantiza que Kafka esté ejecutándose o que la copia esté al día.
 
+## Diagnóstico de sincronización (estado interno para CAT-07)
+
+Flyway V3 crea `catalog_diagnostics`, una única fila de resumen durable. Se registra por separado cada intento de arranque, ciclo periódico y notificación Kafka (`attempt_id`, origen, actividad y fechas), la última versión remota **observada**, el último éxito y un código de error funcional. Los reintentos acotados de un ciclo se registran como intentos individuales; no se guarda un historial ilimitado. `applied_version` se obtiene siempre de `catalog_sync_state` mediante JOIN, no se duplica en el diagnóstico. La versión remota observada conserva su timestamp: un éxito antiguo no demuestra que hoy siga actualizado.
+
+La actividad puede ser `IDLE`, `CHECKING`, `APPLYING` o `REBUILDING`; el último resultado puede ser `UNINITIALIZED`, `CURRENT`, `BEHIND`, `ERROR` o `INTERRUPTED`. Un error no borra la fecha del último éxito. Al arrancar, una actividad que quedó abierta por una caída se marca `INTERRUPTED`; el inicio de un nuevo intento no presenta el viejo como trabajo activo. Los eventos duplicados no implican cambios nuevos, aunque sí dejan constancia de una comprobación. No se guardan excepciones completas, payloads ni credenciales, y un fallo del propio diagnóstico no impide guardar un catálogo válido ni confirmar su procesamiento.
+
+El estado Kafka se calcula **en la ejecución actual**, separado del resultado durable del catálogo: `DISABLED`, `WAITING` (incluye consumidor iniciado sin particiones), `CONSUMING` (particiones asignadas), `STOPPED_RETRYABLE` o `STOPPED_INVALID`. No se persiste `CONSUMING` entre reinicios. El registro del intento y su resultado se coordinan junto con Kafka y scheduler en una sola instancia, sin mantener el monitor durante el backoff. Las transacciones de diagnóstico son independientes de las escrituras de catálogo: si falla una escritura se conserva la evidencia del intento; si PostgreSQL está caído, solo los logs sin secretos podrán registrar el fallo. La consulta está disponible mediante `CatalogDiagnosticsUseCase.status()` para una futura API autenticada; **no hay endpoint HTTP de diagnóstico en esta etapa**. El health sigue siendo un indicador de dependencias, no de frescura o suscripción Kafka.
+
 ## Organización
 
 `config/CatedraIntegrationProperties` reúne los valores propios de la integración técnica; `config/CatalogKafkaConfiguration` define la política de errores Kafka. Los adaptadores del slice están en `catalogo/infrastructure/rest/`, `persistence/jdbc/`, `bootstrap/`, `redis/` y `messaging/`. Las reglas de validez e historial viven en dominio y los casos de uso orquestan lecturas y transacciones mediante puertos. La conexión Redis y los parámetros estándar de Kafka usan las propiedades de autoconfiguración de Spring Boot.
@@ -74,6 +82,8 @@ Requisitos: JDK 25 y Docker en ejecución, accesible por el usuario que ejecuta 
 ```
 
 Las pruebas usan PostgreSQL y Redis mediante Testcontainers, Kafka embebido solo para tests y fuentes remotas ficticias; no necesitan cátedra, ZeroTier ni secretos reales. Cubren snapshot, ACL restringida, incrementos, rollback de datos/versión/evento, orden, duplicados, reconstrucción y rechazo de snapshots obsoletos. Un scheduler real recupera una carga inicial fallida y detecta cambios sin Kafka; también se verifica exclusión mutua, intentos limitados e interrupción del backoff. Kafka prueba replay tras recuperación y que un mensaje inválido no provoque reinicios automáticos. Un coordinador nuevo sobre la persistencia existente verifica la reanudación del progreso.
+
+El diagnóstico se prueba sobre PostgreSQL: conservación del último éxito tras un fallo, rechazo de resultados de intentos antiguos, detección de un intento interrumpido, códigos de error sin secretos y lectura independiente del estado Kafka. El reloj puede sustituirse en pruebas; no se requieren secretos ni la instancia central para ejecutar `verify`.
 
 ### Cobertura JaCoCo
 

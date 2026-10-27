@@ -2,6 +2,8 @@ package ar.edu.turnos.catalogo;
 
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogHistory;
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogSnapshot;
+import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogDiagnostic;
+import ar.edu.turnos.catalogo.catalogo.domain.ports.in.CatalogDiagnosticsUseCase;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogChangesSource;
 import ar.edu.turnos.catalogo.catalogo.domain.ports.out.CatalogSnapshotSource;
 import java.time.Duration;
@@ -96,14 +98,21 @@ class CatalogRecoverySchedulingTests {
 
     @Autowired RemoteCatalog remote;
     @Autowired JdbcTemplate jdbc;
+    @Autowired CatalogDiagnosticsUseCase diagnostics;
 
     @Test
     void schedulerRecoversInitialOutageRebuildsAndDetectsChangesWithoutKafka() {
         assertThat(remote.snapshotCalls.get()).isGreaterThanOrEqualTo(3);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM catalog_sync_state", Integer.class)).isZero();
+        assertThat(diagnostics.status().appliedVersion()).isNull();
+        assertThat(diagnostics.status().lastErrorAt()).isNotNull();
 
         remote.offline.set(false);
         awaitVersion(7);
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            assertThat(diagnostics.status().lastSuccessAt()).isNotNull();
+            assertThat(diagnostics.status().remoteVersion()).isEqualTo(7);
+        });
 
         int beforeRebuild = remote.snapshotCalls.get();
         remote.oldest.set(8);
@@ -115,8 +124,15 @@ class CatalogRecoverySchedulingTests {
         remote.offline.set(true);
         remote.version.set(10);
         assertThat(jdbc.queryForObject("SELECT applied_version FROM catalog_sync_state", Long.class)).isEqualTo(8);
+        var previousSuccess = diagnostics.status().lastSuccessAt();
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            assertThat(diagnostics.status().outcome()).isEqualTo(CatalogDiagnostic.Outcome.ERROR);
+            assertThat(diagnostics.status().lastSuccessAt()).isEqualTo(previousSuccess);
+        });
         remote.offline.set(false);
         awaitVersion(10);
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(diagnostics.status().outcome()).isEqualTo(CatalogDiagnostic.Outcome.CURRENT));
         assertThat(jdbc.queryForObject("SELECT name FROM professional_category WHERE id=1", String.class))
                 .isEqualTo("category-10");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM processed_catalog_event", Integer.class)).isZero();
