@@ -12,6 +12,8 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class CatalogSnapshotJdbcAdapter implements CatalogSnapshotStore, CatalogIncrementStore {
+    private static final String READ_VERSION = "SELECT applied_version FROM catalog_sync_state WHERE id=1";
+    private static final String LOCK_VERSION = "SELECT applied_version FROM catalog_sync_state WHERE id=1 FOR UPDATE";
     private final JdbcTemplate jdbc;
 
     public CatalogSnapshotJdbcAdapter(JdbcTemplate jdbc) {
@@ -73,8 +75,7 @@ public class CatalogSnapshotJdbcAdapter implements CatalogSnapshotStore, Catalog
     }
 
     private long readVersion(boolean lock) {
-        var versions = jdbc.queryForList("SELECT applied_version FROM catalog_sync_state WHERE id=1"
-                + (lock ? " FOR UPDATE" : ""), Long.class);
+        var versions = jdbc.queryForList(lock ? LOCK_VERSION : READ_VERSION, Long.class);
         if (versions.isEmpty()) {
             throw new CatalogRebuildRequiredException("Catalogo no inicializado");
         }
