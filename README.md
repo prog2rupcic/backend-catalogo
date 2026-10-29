@@ -45,6 +45,14 @@ Parámetros opcionales y combinables: `categoryId` (positivo), `name` (subcadena
 
 La respuesta JSON contiene `content` (`id`, `categoryId`, `firstName`, `lastName`, `enabled`), `totalElements`, `page` y `size`. Una página fuera de rango devuelve una lista vacía. Parámetros inválidos devuelven `400`; falta o invalidez del token `401`; un token sin `ROLE_USER`, `403`; catálogo todavía no inicializado, `503`. El health puede estar `DOWN` por Redis aunque la búsqueda local, con una copia ya inicializada, siga disponible.
 
+### Profesional y agenda vigente para turnos (CAT-06)
+
+`GET /api/professionals/{id}` consulta solo la copia PostgreSQL y devuelve el profesional y su categoría (`id`, `name`, `enabled`), junto con `weeklySchedules` habilitados (`id`, `dayOfWeek`, `startTime`, `endTime`, `slotDurationMinutes`). El profesional incluye `id`, `firstName`, `lastName` y `enabled`. La agenda se ordena por día de lunes a domingo, hora de inicio e ID; las horas son locales y no incluyen ocupaciones ni disponibilidad real de una fecha. La lectura de profesional, categoría y horarios comparte una transacción de solo lectura con snapshot consistente.
+
+`backend-turnos` propagará el JWT del usuario: se aplican las mismas exigencias HS256, `iss`, `aud=backend-catalogo`, `sub` y `ROLE_USER` que en CAT-05. Cuando turnos emita tokens para sus propios endpoints y catálogo, la audiencia deberá incluir `backend-catalogo`. Este servicio no emite JWT ni consulta las tablas de turnos.
+
+Una entidad con `enabled=false` sigue existiendo: el endpoint devuelve `200` e informa ese estado tanto para el profesional como para la categoría; los horarios deshabilitados se omiten de la agenda vigente. Un profesional sin horarios habilitados devuelve `weeklySchedules: []`. Turnos debe rechazar nuevas reservas si el profesional o la categoría están deshabilitados o no hay un horario aplicable; `200` aquí no significa que se pueda reservar. Un ID inexistente devuelve `404`, uno no positivo `400`, catálogo aún no inicializado `503`, JWT ausente o inválido `401` y token sin `ROLE_USER` `403`. Una caída de Redis puede poner el health en `DOWN`, pero la lectura local inicializada sigue disponible; corresponde a turnos decidir cómo manejar la frescura de esos datos al iniciar una reserva.
+
 ## Sincronización incremental (CAT-02)
 
 El consumidor se inicia después de una reconciliación exitosa, incluida la inicialización cuando sea necesaria. Usa el topic y consumer group asignados por cátedra, `enable.auto.commit=false` y confirmación manual inmediata. No crea topics. Para deshabilitarlo durante una prueba aislada puede utilizarse `CATALOG_KAFKA_ENABLED=false`.
