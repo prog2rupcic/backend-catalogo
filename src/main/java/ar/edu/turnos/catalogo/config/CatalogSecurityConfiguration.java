@@ -49,7 +49,8 @@ public class CatalogSecurityConfiguration {
         return http.sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> requests
                         .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
-                        .requestMatchers(HttpMethod.GET, "/api/professionals").hasAuthority("ROLE_USER")
+                        .requestMatchers(HttpMethod.GET, "/api/professionals", "/api/professionals/{id}")
+                        .hasAuthority("ROLE_USER")
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(oauth -> oauth.jwt(jwt -> jwt.jwtAuthenticationConverter(converter)))
                 .build();
