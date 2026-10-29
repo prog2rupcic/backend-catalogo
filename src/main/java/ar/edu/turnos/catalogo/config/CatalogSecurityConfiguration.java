@@ -51,6 +51,8 @@ public class CatalogSecurityConfiguration {
                         .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/professionals", "/api/professionals/{id}")
                         .hasAuthority("ROLE_USER")
+                        .requestMatchers(HttpMethod.GET, "/api/catalog/synchronization/status")
+                        .hasAuthority("ROLE_ADMIN")
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(oauth -> oauth.jwt(jwt -> jwt.jwtAuthenticationConverter(converter)))
                 .build();

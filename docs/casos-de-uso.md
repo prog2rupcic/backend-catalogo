@@ -16,7 +16,7 @@ Este servicio es propietario de la copia local de categorías, profesionales, ho
 | CAT-04 | Recuperar una notificación perdida | Arranque o comparación periódica de versiones | Detecta que la versión local está atrasada aunque no haya llegado Kafka y ejecuta sincronización incremental o completa según corresponda. |
 | CAT-05 | Buscar y filtrar profesionales | Usuario autenticado desde Android | Busca sobre la copia local por categoría, nombre, estado habilitado y **atiende el día**, con paginación; no consulta ocupaciones ni reservas. Valida el JWT de usuario HS256 emitido por turnos, independiente del JWT técnico de cátedra. |
 | CAT-06 | Consultar profesional y agenda vigente | `backend-turnos/` con JWT del usuario propagado | Devuelve el profesional y categoría con sus estados habilitados y solo horarios semanales habilitados de la copia local para construir disponibilidad o validar una nueva reserva. Distingue `404` inexistente de `200` deshabilitado y `503` catálogo no inicializado. |
-| CAT-07 | Consultar estado de sincronización | Cliente autorizado / operación y diagnóstico | Informa versión aplicada, estado y errores relevantes sin exponer credenciales de integración. |
+| CAT-07 | Consultar estado de sincronización | Administrador con JWT `ROLE_ADMIN` | Devuelve versión aplicada y última versión remota observada con fecha, intento, actividad, resultado, último éxito, error codificado y estado actual del consumidor Kafka. No expone excepciones ni credenciales; usuarios comunes no acceden. |
 
 ## Reglas compartidas
 
