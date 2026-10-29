@@ -1,6 +1,6 @@
 # backend-catalogo
 
-Servicio de catálogo y sincronización (Java 25, Spring Boot, PostgreSQL). Implementa **CAT-01** (snapshot inicial), **CAT-02** (incrementos Redis notificados por Kafka), **CAT-03** (reconstrucción) y **CAT-04** (reconciliación al iniciar y periódica). Las APIs de búsqueda, agenda y diagnóstico autorizado continúan en sus issues respectivos.
+Servicio de catálogo y sincronización (Java 25, Spring Boot, PostgreSQL). Implementa **CAT-01** (snapshot inicial), **CAT-02** (incrementos Redis notificados por Kafka), **CAT-03** (reconstrucción), **CAT-04** (reconciliación al iniciar y periódica) y **CAT-05** (búsqueda local protegida). Las APIs de agenda y diagnóstico autorizado continúan en sus issues respectivos.
 
 ## Configuración
 
@@ -10,6 +10,8 @@ Se necesita Docker para ejecutar el servicio con PostgreSQL y para las pruebas c
 | --- | --- |
 | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Base propia del catálogo en Compose. |
 | `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` | Conexión de Spring a PostgreSQL. En Compose el host de la URL es `db`. |
+| `CATALOG_USER_JWT_SECRET` | Clave HS256 compartida con `backend-turnos`, de al menos 32 bytes UTF-8. Obligatoria para iniciar el servicio; diferente del JWT técnico de cátedra. |
+| `CATALOG_USER_JWT_ISSUER` | Emisor esperado del JWT de usuario; por defecto `backend-turnos`. |
 | `CATEDRA_REST_URL` | URL base REST de cátedra. |
 | `CATEDRA_TECHNICAL_JWT` | JWT técnico de cátedra; nunca se envía a la app Android. |
 | `REDIS_HOST`, `REDIS_PORT`, `REDIS_USERNAME`, `REDIS_PASSWORD` | Conexión ACL de solo lectura al catálogo Redis de cátedra. |
@@ -21,6 +23,7 @@ Se necesita Docker para ejecutar el servicio con PostgreSQL y para las pruebas c
 | `CATALOG_RECONCILIATION_RETRY_DELAY` | Espera inicial del backoff exponencial, positiva y hasta `10s`; por defecto `1s`. |
 
 Spring no carga `.env` por sí solo: `compose.yaml` inyecta esas variables con `env_file`. Para ejecutar Spring fuera de Compose, exportarlas al entorno y usar `jdbc:postgresql://localhost:5433/catalogo` como URL de base.
+En instalaciones existentes, agregar `CATALOG_USER_JWT_SECRET` al `.env` local antes de reconstruir la imagen (`openssl rand -hex 32` genera un valor apto). Configurar **el mismo valor** al implementar el emisor en `backend-turnos`; nunca publicarlo ni incluirlo en Android.
 
 ```bash
 docker compose up --build
@@ -32,7 +35,15 @@ Si falla la primera carga, el servicio queda **no inicializado** (sin fila en `c
 
 La conexión Redis tiene un indicador propio (`catalogRedis`) que ejecuta únicamente `GET catedra:sync:current-version`: el indicador predeterminado de Spring está desactivado porque la ACL de cátedra no permite los comandos `PING`/`INFO`. El indicador propio marca `UP` si puede leer una versión decimal no negativa representable como `long`; marca `DOWN` ante una clave ausente, contenido inválido, fallo de autenticación, permisos o conectividad. No publica credenciales ni mensajes internos de excepciones. Es una comprobación de acceso al catálogo remoto, no una garantía de que la versión local esté actualizada.
 
-`/actuator/health` combina este indicador con PostgreSQL y la inicialización local: puede quedar `DOWN` aunque el snapshot ya esté aplicado si falla Redis. No se exponen detalles adicionales del endpoint público. Todavía no hay APIs de búsqueda ni una acción administrativa de sincronización.
+`/actuator/health` combina este indicador con PostgreSQL y la inicialización local: puede quedar `DOWN` aunque el snapshot ya esté aplicado si falla Redis. No se exponen detalles adicionales del endpoint público. No hay una acción administrativa HTTP de sincronización.
+
+### Búsqueda local de profesionales (CAT-05)
+
+`GET /api/professionals` consulta únicamente PostgreSQL, sin solicitar datos a cátedra ni consultar ocupaciones. Requiere `Authorization: Bearer <jwt-de-usuario>` firmado con HS256 por `backend-turnos`, `iss=backend-turnos` (o el emisor configurado), `aud` que incluya `backend-catalogo`, `sub` no vacío, vencimiento vigente y `authorities` con `ROLE_USER`. Catálogo **solo valida**, no emite tokens. La clave de usuarios y el JWT técnico de cátedra son independientes. `/actuator/health` permanece público; los demás endpoints no publicados están denegados por defecto. Hasta implementar el login en turnos, el contrato se verifica con tokens ficticios en pruebas automatizadas.
+
+Parámetros opcionales y combinables: `categoryId` (positivo), `name` (subcadena del nombre completo, sin distinguir mayúsculas, hasta 100 caracteres), `enabled` (por defecto `true`; usar `false` para consultar bajas lógicas), `dayOfWeek` (`MONDAY` a `SUNDAY`), `page` (desde 0, por defecto 0) y `size` (1 a 100, por defecto 20). El día exige al menos un horario semanal **habilitado** y no significa que haya turnos libres en una fecha. Los caracteres `%` y `_` en el nombre se tratan como texto literal. Los resultados se ordenan por apellido, nombre e ID de forma estable, sin duplicar profesionales con varios horarios.
+
+La respuesta JSON contiene `content` (`id`, `categoryId`, `firstName`, `lastName`, `enabled`), `totalElements`, `page` y `size`. Una página fuera de rango devuelve una lista vacía. Parámetros inválidos devuelven `400`; falta o invalidez del token `401`; un token sin `ROLE_USER`, `403`; catálogo todavía no inicializado, `503`. El health puede estar `DOWN` por Redis aunque la búsqueda local, con una copia ya inicializada, siga disponible.
 
 ## Sincronización incremental (CAT-02)
 

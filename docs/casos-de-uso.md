@@ -14,7 +14,7 @@ Este servicio es propietario de la copia local de categorías, profesionales, ho
 | CAT-02 | Sincronizar cambios incrementales | Notificación Kafka `CatalogUpdated` o verificación de versiones | Deduplica por `eventId`, consulta en Redis versiones y cambios, lee las entidades afectadas y aplica cada versión en orden. Avanza la versión local y confirma el offset solo después de persistir. |
 | CAT-03 | Reconstruir catálogo ante una discontinuidad | Versión faltante, fuera de la ventana de Redis o estado local no verificable | Solicita un snapshot REST y reemplaza la copia y su versión de forma consistente. |
 | CAT-04 | Recuperar una notificación perdida | Arranque o comparación periódica de versiones | Detecta que la versión local está atrasada aunque no haya llegado Kafka y ejecuta sincronización incremental o completa según corresponda. |
-| CAT-05 | Buscar y filtrar profesionales | Usuario final desde Android | Busca sobre la copia local por categoría, nombre, estado habilitado y **atiende el día**; no consulta ocupaciones ni reservas. |
+| CAT-05 | Buscar y filtrar profesionales | Usuario autenticado desde Android | Busca sobre la copia local por categoría, nombre, estado habilitado y **atiende el día**, con paginación; no consulta ocupaciones ni reservas. Valida el JWT de usuario HS256 emitido por turnos, independiente del JWT técnico de cátedra. |
 | CAT-06 | Consultar profesional y agenda vigente | `backend-turnos/` con comunicación autenticada | Devuelve información actual del profesional y sus horarios para construir disponibilidad o validar una nueva reserva. |
 | CAT-07 | Consultar estado de sincronización | Cliente autorizado / operación y diagnóstico | Informa versión aplicada, estado y errores relevantes sin exponer credenciales de integración. |
 
@@ -25,4 +25,3 @@ Este servicio es propietario de la copia local de categorías, profesionales, ho
 - Un evento duplicado no debe duplicar efectos; la versión local se actualiza únicamente cuando los datos correspondientes quedaron aplicados correctamente.
 - Si la versión local es anterior a `oldest-available-version`, se recupera mediante snapshot, no intentando saltar versiones.
 - La cuenta técnica de cátedra se registra una sola vez fuera de Android; este backend usa su configuración y credenciales externalizadas para integrarse, sin exponerlas a clientes.
-
