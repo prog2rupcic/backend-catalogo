@@ -6,11 +6,11 @@ import ar.edu.turnos.catalogo.catalogo.domain.ports.in.SearchProfessionalsUseCas
 import ar.edu.turnos.catalogo.catalogo.infrastructure.web.dto.ProfessionalSearchResponse;
 import java.time.DayOfWeek;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -34,10 +34,12 @@ public class ProfessionalSearchController {
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
-    @ResponseStatus(HttpStatus.BAD_REQUEST)
-    public void invalidFilter() { }
+    public ResponseEntity<Void> invalidFilter() {
+        return ResponseEntity.badRequest().build();
+    }
 
     @ExceptionHandler(CatalogUnavailableException.class)
-    @ResponseStatus(HttpStatus.SERVICE_UNAVAILABLE)
-    public void unavailable() { }
+    public ResponseEntity<Void> unavailable() {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
+    }
 }
