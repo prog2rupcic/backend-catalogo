@@ -41,7 +41,8 @@ import static org.awaitility.Awaitility.await;
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class CatalogRecoverySchedulingTests {
     @Container
-    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17-alpine");
+    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17-alpine")
+            .withStartupTimeout(Duration.ofMinutes(2));
 
     @DynamicPropertySource
     static void database(DynamicPropertyRegistry registry) {
