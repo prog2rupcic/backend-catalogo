@@ -1,6 +1,6 @@
 # backend-catalogo
 
-Servicio de catálogo y sincronización (Java 25, Spring Boot, PostgreSQL). Implementa **CAT-01** (snapshot inicial), **CAT-02** (incrementos Redis notificados por Kafka), **CAT-03** (reconstrucción), **CAT-04** (reconciliación al iniciar y periódica) y **CAT-05** (búsqueda local protegida). Las APIs de agenda y diagnóstico autorizado continúan en sus issues respectivos.
+Servicio de catálogo y sincronización (Java 25, Spring Boot, PostgreSQL). Implementa **CAT-01** (snapshot inicial), **CAT-02** (incrementos Redis notificados por Kafka), **CAT-03** (reconstrucción), **CAT-04** (reconciliación al iniciar y periódica), **CAT-05** (búsqueda local protegida), **CAT-06** (profesional y agenda vigente) y **CAT-07** (diagnóstico de sincronización para administradores).
 
 ## Configuración
 
@@ -114,7 +114,7 @@ El diagnóstico se prueba sobre PostgreSQL: conservación del último éxito tra
 
 ### Integración continua y revisión
 
-`.github/workflows/backend-ci.yml` ejecuta el mismo `verify` con Temurin 25 y Docker en Ubuntu ante cada push a cualquier rama, ante cambios en PRs hacia `develop`, `test` o `main`, y manualmente desde Actions. No necesita `.env`, ZeroTier ni secretos de cátedra. La caché almacena dependencias Maven, no los resultados de las pruebas. Los informes Surefire y JaCoCo se publican como artefactos por 14 días; si el build falla antes de generarlos, pueden no estar disponibles y el diagnóstico se consulta en los logs. Un fallo de tests mantiene el check en rojo, aunque se publiquen los informes.
+`.github/workflows/backend-ci.yml` ejecuta el mismo `verify` con Temurin 25 y Docker en Ubuntu ante cada push a cualquier rama, ante cambios en PRs hacia `develop`, `test` o `main`, y manualmente desde Actions. Luego comprueba el XML de JaCoCo y lo importa en SonarCloud mediante el scanner Maven. Requiere el secreto de Actions `SONAR_TOKEN` y las variables `SONAR_ORGANIZATION` y `SONAR_PROJECT_KEY`; en SonarCloud se desactiva Automatic Analysis para usar el análisis desde CI. No necesita `.env`, ZeroTier ni secretos de cátedra. La caché almacena dependencias Maven, no los resultados de las pruebas. Los informes Surefire y JaCoCo se publican como artefactos por 14 días; si el build falla antes de generarlos, pueden no estar disponibles y el diagnóstico se consulta en los logs. Un fallo de tests mantiene el check en rojo, aunque se publiquen los informes.
 
 Flujo recomendado:
 
