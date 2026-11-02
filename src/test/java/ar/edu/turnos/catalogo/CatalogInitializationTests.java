@@ -17,6 +17,7 @@ import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogHistory;
 import ar.edu.turnos.catalogo.catalogo.domain.model.CatalogDiagnostic;
 import ar.edu.turnos.catalogo.catalogo.application.usecases.SynchronizeCatalogUseCaseImpl;
 import java.time.DayOfWeek;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalTime;
 import java.util.List;
@@ -54,7 +55,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @Testcontainers
 class CatalogInitializationTests {
     @Container
-    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17-alpine");
+    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17-alpine")
+            .withStartupTimeout(Duration.ofMinutes(2));
 
     @DynamicPropertySource
     static void database(DynamicPropertyRegistry registry) {

@@ -1,6 +1,6 @@
 # backend-catalogo
 
-Servicio de catálogo y sincronización (Java 25, Spring Boot, PostgreSQL). Implementa **CAT-01** (snapshot inicial), **CAT-02** (incrementos Redis notificados por Kafka), **CAT-03** (reconstrucción) y **CAT-04** (reconciliación al iniciar y periódica). Las APIs de búsqueda, agenda y diagnóstico autorizado continúan en sus issues respectivos.
+Servicio de catálogo y sincronización (Java 25, Spring Boot, PostgreSQL). Implementa **CAT-01** (snapshot inicial), **CAT-02** (incrementos Redis notificados por Kafka), **CAT-03** (reconstrucción), **CAT-04** (reconciliación al iniciar y periódica) y **CAT-05** (búsqueda local protegida). Las APIs de agenda y diagnóstico autorizado continúan en sus issues respectivos.
 
 ## Configuración
 
@@ -10,6 +10,8 @@ Se necesita Docker para ejecutar el servicio con PostgreSQL y para las pruebas c
 | --- | --- |
 | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Base propia del catálogo en Compose. |
 | `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` | Conexión de Spring a PostgreSQL. En Compose el host de la URL es `db`. |
+| `CATALOG_USER_JWT_SECRET` | Clave HS256 compartida con `backend-turnos`, de al menos 32 bytes UTF-8. Obligatoria para iniciar el servicio; diferente del JWT técnico de cátedra. |
+| `CATALOG_USER_JWT_ISSUER` | Emisor esperado del JWT de usuario; por defecto `backend-turnos`. |
 | `CATEDRA_REST_URL` | URL base REST de cátedra. |
 | `CATEDRA_TECHNICAL_JWT` | JWT técnico de cátedra; nunca se envía a la app Android. |
 | `REDIS_HOST`, `REDIS_PORT`, `REDIS_USERNAME`, `REDIS_PASSWORD` | Conexión ACL de solo lectura al catálogo Redis de cátedra. |
@@ -21,6 +23,7 @@ Se necesita Docker para ejecutar el servicio con PostgreSQL y para las pruebas c
 | `CATALOG_RECONCILIATION_RETRY_DELAY` | Espera inicial del backoff exponencial, positiva y hasta `10s`; por defecto `1s`. |
 
 Spring no carga `.env` por sí solo: `compose.yaml` inyecta esas variables con `env_file`. Para ejecutar Spring fuera de Compose, exportarlas al entorno y usar `jdbc:postgresql://localhost:5433/catalogo` como URL de base.
+En instalaciones existentes, agregar `CATALOG_USER_JWT_SECRET` al `.env` local antes de reconstruir la imagen (`openssl rand -hex 32` genera un valor apto). Configurar **el mismo valor** al implementar el emisor en `backend-turnos`; nunca publicarlo ni incluirlo en Android.
 
 ```bash
 docker compose up --build
@@ -32,7 +35,23 @@ Si falla la primera carga, el servicio queda **no inicializado** (sin fila en `c
 
 La conexión Redis tiene un indicador propio (`catalogRedis`) que ejecuta únicamente `GET catedra:sync:current-version`: el indicador predeterminado de Spring está desactivado porque la ACL de cátedra no permite los comandos `PING`/`INFO`. El indicador propio marca `UP` si puede leer una versión decimal no negativa representable como `long`; marca `DOWN` ante una clave ausente, contenido inválido, fallo de autenticación, permisos o conectividad. No publica credenciales ni mensajes internos de excepciones. Es una comprobación de acceso al catálogo remoto, no una garantía de que la versión local esté actualizada.
 
-`/actuator/health` combina este indicador con PostgreSQL y la inicialización local: puede quedar `DOWN` aunque el snapshot ya esté aplicado si falla Redis. No se exponen detalles adicionales del endpoint público. Todavía no hay APIs de búsqueda ni una acción administrativa de sincronización.
+`/actuator/health` combina este indicador con PostgreSQL y la inicialización local: puede quedar `DOWN` aunque el snapshot ya esté aplicado si falla Redis. No se exponen detalles adicionales del endpoint público. No hay una acción administrativa HTTP de sincronización.
+
+### Búsqueda local de profesionales (CAT-05)
+
+`GET /api/professionals` consulta únicamente PostgreSQL, sin solicitar datos a cátedra ni consultar ocupaciones. Requiere `Authorization: Bearer <jwt-de-usuario>` firmado con HS256 por `backend-turnos`, `iss=backend-turnos` (o el emisor configurado), `aud` que incluya `backend-catalogo`, `sub` no vacío, vencimiento vigente y `authorities` con `ROLE_USER`. Catálogo **solo valida**, no emite tokens. La clave de usuarios y el JWT técnico de cátedra son independientes. `/actuator/health` permanece público; los demás endpoints no publicados están denegados por defecto. Hasta implementar el login en turnos, el contrato se verifica con tokens ficticios en pruebas automatizadas.
+
+Parámetros opcionales y combinables: `categoryId` (positivo), `name` (subcadena del nombre completo, sin distinguir mayúsculas, hasta 100 caracteres), `enabled` (por defecto `true`; usar `false` para consultar bajas lógicas), `dayOfWeek` (`MONDAY` a `SUNDAY`), `page` (desde 0, por defecto 0) y `size` (1 a 100, por defecto 20). El día exige al menos un horario semanal **habilitado** y no significa que haya turnos libres en una fecha. Los caracteres `%` y `_` en el nombre se tratan como texto literal. Los resultados se ordenan por apellido, nombre e ID de forma estable, sin duplicar profesionales con varios horarios.
+
+La respuesta JSON contiene `content` (`id`, `categoryId`, `firstName`, `lastName`, `enabled`), `totalElements`, `page` y `size`. Una página fuera de rango devuelve una lista vacía. Parámetros inválidos devuelven `400`; falta o invalidez del token `401`; un token sin `ROLE_USER`, `403`; catálogo todavía no inicializado, `503`. El health puede estar `DOWN` por Redis aunque la búsqueda local, con una copia ya inicializada, siga disponible.
+
+### Profesional y agenda vigente para turnos (CAT-06)
+
+`GET /api/professionals/{id}` consulta solo la copia PostgreSQL y devuelve el profesional y su categoría (`id`, `name`, `enabled`), junto con `weeklySchedules` habilitados (`id`, `dayOfWeek`, `startTime`, `endTime`, `slotDurationMinutes`). El profesional incluye `id`, `firstName`, `lastName` y `enabled`. La agenda se ordena por día de lunes a domingo, hora de inicio e ID; las horas son locales y no incluyen ocupaciones ni disponibilidad real de una fecha. La lectura de profesional, categoría y horarios comparte una transacción de solo lectura con snapshot consistente.
+
+`backend-turnos` propagará el JWT del usuario: se aplican las mismas exigencias HS256, `iss`, `aud=backend-catalogo`, `sub` y `ROLE_USER` que en CAT-05. Cuando turnos emita tokens para sus propios endpoints y catálogo, la audiencia deberá incluir `backend-catalogo`. Este servicio no emite JWT ni consulta las tablas de turnos.
+
+Una entidad con `enabled=false` sigue existiendo: el endpoint devuelve `200` e informa ese estado tanto para el profesional como para la categoría; los horarios deshabilitados se omiten de la agenda vigente. Un profesional sin horarios habilitados devuelve `weeklySchedules: []`. Turnos debe rechazar nuevas reservas si el profesional o la categoría están deshabilitados o no hay un horario aplicable; `200` aquí no significa que se pueda reservar. Un ID inexistente devuelve `404`, uno no positivo `400`, catálogo aún no inicializado `503`, JWT ausente o inválido `401` y token sin `ROLE_USER` `403`. Una caída de Redis puede poner el health en `DOWN`, pero la lectura local inicializada sigue disponible; corresponde a turnos decidir cómo manejar la frescura de esos datos al iniciar una reserva.
 
 ## Sincronización incremental (CAT-02)
 
@@ -59,15 +78,19 @@ El procesamiento requiere un historial continuo: por ejemplo, versión local `3`
 - Kafka confirma solamente al terminar correctamente. Ante un fallo recuperable se detiene sin confirmar el registro; después de una reconciliación exitosa se reanuda y hace replay desde el offset confirmado. La idempotencia permite que el catálogo ya esté actualizado cuando llegue ese replay.
 - Un evento inválido bloquea la reanudación automática del consumidor en esa ejecución: no se descarta ni se confirma silenciosamente y no se crea un bucle de reinicios. Requiere diagnóstico/corrección operativa. La reconciliación periódica del catálogo puede continuar independientemente.
 
-Al reiniciar, la versión y las marcas persistidas permiten retomar el progreso, y se compara nuevamente con cátedra. No existe una acción administrativa HTTP para sincronizar. `catalog.bootstrap.enabled=false` desactiva la comprobación inicial, y `catalog.reconciliation.enabled=false` desactiva las siguientes; en producción se mantienen ambas activadas. CAT-07 agregará el diagnóstico autorizado; el health actual no garantiza que Kafka esté ejecutándose o que la copia esté al día.
+Al reiniciar, la versión y las marcas persistidas permiten retomar el progreso, y se compara nuevamente con cátedra. No existe una acción administrativa HTTP para sincronizar. `catalog.bootstrap.enabled=false` desactiva la comprobación inicial, y `catalog.reconciliation.enabled=false` desactiva las siguientes; en producción se mantienen ambas activadas. El health actual no garantiza que Kafka esté ejecutándose o que la copia esté al día; para ello existe el diagnóstico autorizado.
 
-## Diagnóstico de sincronización (estado interno para CAT-07)
+## Diagnóstico de sincronización (CAT-07)
 
 Flyway V3 crea `catalog_diagnostics`, una única fila de resumen durable. Se registra por separado cada intento de arranque, ciclo periódico y notificación Kafka (`attempt_id`, origen, actividad y fechas), la última versión remota **observada**, el último éxito y un código de error funcional. Los reintentos acotados de un ciclo se registran como intentos individuales; no se guarda un historial ilimitado. `applied_version` se obtiene siempre de `catalog_sync_state` mediante JOIN, no se duplica en el diagnóstico. La versión remota observada conserva su timestamp: un éxito antiguo no demuestra que hoy siga actualizado.
 
 La actividad puede ser `IDLE`, `CHECKING`, `APPLYING` o `REBUILDING`; el último resultado puede ser `UNINITIALIZED`, `CURRENT`, `BEHIND`, `ERROR` o `INTERRUPTED`. Un error no borra la fecha del último éxito. Al arrancar, una actividad que quedó abierta por una caída se marca `INTERRUPTED`; el inicio de un nuevo intento no presenta el viejo como trabajo activo. Los eventos duplicados no implican cambios nuevos, aunque sí dejan constancia de una comprobación. No se guardan excepciones completas, payloads ni credenciales, y un fallo del propio diagnóstico no impide guardar un catálogo válido ni confirmar su procesamiento.
 
-El estado Kafka se calcula **en la ejecución actual**, separado del resultado durable del catálogo: `DISABLED`, `WAITING` (incluye consumidor iniciado sin particiones), `CONSUMING` (particiones asignadas), `STOPPED_RETRYABLE` o `STOPPED_INVALID`. No se persiste `CONSUMING` entre reinicios. El registro del intento y su resultado se coordinan junto con Kafka y scheduler en una sola instancia, sin mantener el monitor durante el backoff. Las transacciones de diagnóstico son independientes de las escrituras de catálogo: si falla una escritura se conserva la evidencia del intento; si PostgreSQL está caído, solo los logs sin secretos podrán registrar el fallo. La consulta está disponible mediante `CatalogDiagnosticsUseCase.status()` para una futura API autenticada; **no hay endpoint HTTP de diagnóstico en esta etapa**. El health sigue siendo un indicador de dependencias, no de frescura o suscripción Kafka.
+El estado Kafka se calcula **en la ejecución actual**, separado del resultado durable del catálogo: `DISABLED`, `WAITING` (incluye consumidor iniciado sin particiones), `CONSUMING` (particiones asignadas), `STOPPED_RETRYABLE` o `STOPPED_INVALID`. No se persiste `CONSUMING` entre reinicios. El registro del intento y su resultado se coordinan junto con Kafka y scheduler en una sola instancia, sin mantener el monitor durante el backoff. Las transacciones de diagnóstico son independientes de las escrituras de catálogo: si falla una escritura se conserva la evidencia del intento; si PostgreSQL está caído, solo los logs sin secretos podrán registrar el fallo. El health sigue siendo un indicador de dependencias, no de frescura o suscripción Kafka.
+
+`GET /api/catalog/synchronization/status` expone la consulta `CatalogDiagnosticsUseCase.status()` **solo a JWT de usuario firmados por `backend-turnos` con `ROLE_ADMIN`**. Valida HS256, `iss`, `aud=backend-catalogo`, `sub` y expiración con las mismas reglas que las otras APIs; el JWT técnico de cátedra no autoriza este endpoint. Un `ROLE_USER` recibe `403`; sin JWT válido, `401`. `backend-turnos` aún no emite tokens administrativos: hasta implementarlo, la autorización se prueba con JWT ficticios aislados. La app de usuarios no accede a este diagnóstico.
+
+La respuesta contiene `appliedVersion` (obtenida de `catalog_sync_state`), `remoteVersion` y `remoteObservedAt` (última lectura remota registrada), `attemptId`, `source`, `activity`, `outcome`, `startedAt`, `finishedAt`, `lastSuccessAt`, `lastErrorCode`, `lastErrorAt` y `kafka`. Los campos aún desconocidos son `null`, las fechas son instantes UTC y los errores son códigos funcionales; no se incluyen excepciones, payloads ni secretos. Con la base disponible, un catálogo todavía sin inicializar devuelve `200` con `appliedVersion=null` y `outcome=UNINITIALIZED`; si falla el acceso a PostgreSQL, devuelve `503` sin detalles internos. Una respuesta `CURRENT` describe la **última comprobación**, no garantiza que la cátedra siga en esa versión ahora: mirar `remoteObservedAt` y `lastSuccessAt` antes de interpretarla. Un error conserva la fecha del último éxito, y `lastErrorCode` puede representar un fallo histórico incluso tras un éxito posterior.
 
 ## Organización
 
