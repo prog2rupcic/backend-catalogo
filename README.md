@@ -32,8 +32,11 @@ Se necesita Docker para ejecutar el servicio con PostgreSQL y para las pruebas c
 Spring no carga `.env` por sí solo: `compose.yaml` inyecta esas variables con `env_file`. Para ejecutar Spring fuera de Compose, exportarlas al entorno y usar `jdbc:postgresql://localhost:5433/catalogo` como URL de base.
 En instalaciones existentes, agregar `CATALOG_USER_JWT_SECRET` al `.env` local antes de reconstruir la imagen (`openssl rand -hex 32` genera un valor apto). Configurar **el mismo valor** al implementar el emisor en `backend-turnos`; nunca publicarlo ni incluirlo en Android.
 
+La aplicación participa de la red compartida `turnos-integracion` y responde en ella con el alias `catalogo-api`; su PostgreSQL queda solo en la red privada `catalog-private`. Crear la red compartida una sola vez antes de levantar cualquiera de los dos backends:
+
 ```bash
-docker compose up --build
+docker network create --driver bridge --subnet 172.29.0.0/16 turnos-integracion
+docker compose up -d --build
 ```
 
 Compose levanta solo este servicio y su PostgreSQL; **REST, Redis y Kafka de cátedra son externos** y deben ser accesibles desde el contenedor (por ejemplo, con ZeroTier activo). Flyway crea el esquema al iniciar. Si la base no tiene versión aplicada, se solicita `GET /api/synchronization/snapshot` con el JWT técnico y se guarda el catálogo y `snapshotVersion` en una transacción. Las entidades deshabilitadas se conservan. En cada arranque se compara además la versión local con la publicada: reiniciar no descarga un snapshot innecesario si el catálogo ya está actualizado, pero sí recupera el atraso.
