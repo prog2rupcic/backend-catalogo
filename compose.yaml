@@ -14,6 +14,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    networks:
+      - catalog_private
 
   catalogo:
     build: .
@@ -23,6 +25,21 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      catalog_private: {}
+      turnos_integration:
+        aliases:
+          - catalogo-api
 
 volumes:
   catalog_db:
+
+networks:
+  catalog_private:
+    name: catalog-private
+    ipam:
+      config:
+        - subnet: 172.27.0.0/16
+  turnos_integration:
+    name: turnos-integracion
+    external: true

@@ -1,3 +1,10 @@
+<!-- calidad:inicio -->
+![Calidad](https://img.shields.io/badge/Calidad-61%2F100-green) ![Aprobar](https://img.shields.io/badge/Aprobar-no-red) ![Destacar](https://img.shields.io/badge/Destacar-no-lightgrey) ![Build](https://img.shields.io/badge/Build-OK-green) ![Duplicación](https://img.shields.io/badge/Duplicaci%C3%B3n-0.9%25-green) ![%POO](https://img.shields.io/badge/%25POO-80%25-yellow) ![Sueltas](https://img.shields.io/badge/Sueltas-0-green) ![D1](https://img.shields.io/badge/D1-6-red) ![D2](https://img.shields.io/badge/D2-100-green) ![D4](https://img.shields.io/badge/D4-60-yellow) ![D5](https://img.shields.io/badge/D5-100-green) ![D6](https://img.shields.io/badge/D6-40-orange) ![D7](https://img.shields.io/badge/D7-100-green)
+
+**Calidad (heurístico, 7 dimensiones):** índice **61/100** · build **OK** · aprobar **no (7/11)** · destacar **no**
+Detalle completo en [`docs/EVALUACION.md`](docs/EVALUACION.md).
+<!-- calidad:fin -->
+
 # backend-catalogo
 
 Servicio de catálogo y sincronización (Java 25, Spring Boot, PostgreSQL). Implementa **CAT-01** (snapshot inicial), **CAT-02** (incrementos Redis notificados por Kafka), **CAT-03** (reconstrucción), **CAT-04** (reconciliación al iniciar y periódica), **CAT-05** (búsqueda local protegida), **CAT-06** (profesional y agenda vigente) y **CAT-07** (diagnóstico de sincronización para administradores).
@@ -25,8 +32,11 @@ Se necesita Docker para ejecutar el servicio con PostgreSQL y para las pruebas c
 Spring no carga `.env` por sí solo: `compose.yaml` inyecta esas variables con `env_file`. Para ejecutar Spring fuera de Compose, exportarlas al entorno y usar `jdbc:postgresql://localhost:5433/catalogo` como URL de base.
 En instalaciones existentes, agregar `CATALOG_USER_JWT_SECRET` al `.env` local antes de reconstruir la imagen (`openssl rand -hex 32` genera un valor apto). Configurar **el mismo valor** al implementar el emisor en `backend-turnos`; nunca publicarlo ni incluirlo en Android.
 
+La aplicación participa de la red compartida `turnos-integracion` y responde en ella con el alias `catalogo-api`; su PostgreSQL queda solo en la red privada `catalog-private`. Crear la red compartida una sola vez antes de levantar cualquiera de los dos backends:
+
 ```bash
-docker compose up --build
+docker network create --driver bridge --subnet 172.29.0.0/16 turnos-integracion
+docker compose up -d --build
 ```
 
 Compose levanta solo este servicio y su PostgreSQL; **REST, Redis y Kafka de cátedra son externos** y deben ser accesibles desde el contenedor (por ejemplo, con ZeroTier activo). Flyway crea el esquema al iniciar. Si la base no tiene versión aplicada, se solicita `GET /api/synchronization/snapshot` con el JWT técnico y se guarda el catálogo y `snapshotVersion` en una transacción. Las entidades deshabilitadas se conservan. En cada arranque se compara además la versión local con la publicada: reiniciar no descarga un snapshot innecesario si el catálogo ya está actualizado, pero sí recupera el atraso.
